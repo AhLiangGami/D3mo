@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Meteor Dodge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+  /* Deliberately single-theme: a night-sky arcade screen. */
+  :root {
+    color-scheme: dark;
+    --sky: #14122b;
+    --sky-deep: #0c0b1d;
+    --ink: #edeaf7;
+    --ink-dim: #9d98c2;
+    --ship: #ffb547;
+    --rock: #e2687a;
+    --star: #c9c6e8;
+    --display: "Chakra Petch", "Trebuchet MS", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--sky-deep);
+    color: var(--ink);
+    font-family: var(--mono);
+    display: flex;
+    flex-direction: column;
+    padding-inline: 16px;
+    padding-block: 12px;
+    box-sizing: border-box;
+    gap: 10px;
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 24px;
+    max-width: 720px;
+    width: 100%;
+    margin-inline: auto;
+  }
+  h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: 1.6rem;
+    letter-spacing: 0.04em;
+    margin: 0;
+    text-transform: uppercase;
+  }
+  h1 span { color: var(--ship); }
+  .stats { display: flex; gap: 20px; font-variant-numeric: tabular-nums; }
+  .stat { display: flex; flex-direction: column; align-items: flex-end; }
+  .stat small {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--ink-dim);
+  }
+  .stat b { font-weight: 600; font-size: 1.15rem; }
+  .stat.best b { color: var(--ship); }
+  .stage {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    max-width: 720px;
+    width: 100%;
+    margin-inline: auto;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--sky);
+    outline: 1px solid #2a2750;
+  }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    text-align: center;
+    padding: 16px;
+    background: linear-gradient(to bottom, #14122b00, #0c0b1dcc 45%, #14122b00);
+  }
+  .overlay h2 {
+    font-family: var(--display);
+    font-size: clamp(1.6rem, 6vw, 2.6rem);
+    margin: 0;
+    text-wrap: balance;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .overlay p { margin: 0; color: var(--ink-dim); max-width: 36ch; line-height: 1.5; }
+  button {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: 1rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--sky-deep);
+    background: var(--ship);
+    border: 0;
+    border-radius: 4px;
+    padding: 12px 26px;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+  kbd {
+    font-family: var(--mono);
+    font-size: 0.8em;
+    border: 1px solid #3a3668;
+    border-bottom-width: 2px;
+    border-radius: 3px;
+    padding: 0 5px;
+    color: var(--ink);
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Meteor <span>Dodge</span></h1>
+  <div class="stats">
+    <div class="stat"><small>Time</small><b id="time">0.00s</b></div>
+    <div class="stat best"><small>Best</small><b id="best">0.00s</b></div>
+  </div>
+</header>
+
+<div class="stage" id="stage">
+  <canvas id="game" aria-label="Game area"></canvas>
+  <div class="overlay" id="overlay">
+    <h2 id="headline">Survive the shower</h2>
+    <p id="message">Steer with <kbd>←</kbd> <kbd>→</kbd> or <kbd>A</kbd> <kbd>D</kbd>, or drag on the screen. Meteors fall faster the longer you last.</p>
+    <button id="start" type="button">Launch</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const stage = document.getElementById("stage");
+  const overlay = document.getElementById("overlay");
+  const headline = document.getElementById("headline");
+  const message = document.getElementById("message");
+  const startBtn = document.getElementById("start");
+  const timeEl = document.getElementById("time");
+  const bestEl = document.getElementById("best");
+
+  const COLORS = { ship: "#ffb547", rock: "#e2687a", rockCore: "#a8405a", star: "#c9c6e8", flame: "#ff7a3d" };
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  let W = 0, H = 0, dpr = 1;
+  let stars = [];
+  let meteors = [];
+  let sparks = [];
+  let ship = { x: 0, y: 0, r: 14, vx: 0 };
+  let state = "idle"; // idle | playing | over
+  let elapsed = 0;
+  let spawnTimer = 0;
+  let pointerX = null;
+  const keys = { left: false, right: false };
+
+  let best = 0;
+  try { best = parseFloat(localStorage.getItem("meteor-dodge-best")) || 0; } catch (e) {}
+  bestEl.textContent = best.toFixed(2) + "s";
+
+  function resize() {
+    const rect = stage.getBoundingClientRect();
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = rect.width; H = rect.height;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ship.y = H - 40;
+    ship.x = Math.min(Math.max(ship.x || W / 2, ship.r), W - ship.r);
+    stars = Array.from({ length: Math.round(W * H / 2600) }, () => ({
+      x: Math.random() * W, y: Math.random() * H,
+      s: Math.random() * 1.4 + 0.3, v: Math.random() * 14 + 6,
+    }));
+  }
+
+  // Difficulty ramps with time survived.
+  const spawnInterval = t => Math.max(0.12, 0.7 - t * 0.018);
+  const fallSpeed = t => 140 + t * 9;
+
+  function spawnMeteor(t) {
+    const r = 8 + Math.random() * 18;
+    meteors.push({
+      x: Math.random() * (W - 2 * r) + r,
+      y: -r,
+      r,
+      vy: fallSpeed(t) * (0.75 + Math.random() * 0.5),
+      vx: (Math.random() - 0.5) * 40,
+      rot: Math.random() * Math.PI,
+      spin: (Math.random() - 0.5) * 3,
+      sides: 6 + Math.floor(Math.random() * 3),
+    });
+  }
+
+  function reset() {
+    meteors = []; sparks = [];
+    elapsed = 0; spawnTimer = 0;
+    ship.x = W / 2; ship.vx = 0;
+    timeEl.textContent = "0.00s";
+  }
+
+  function start() {
+    reset();
+    state = "playing";
+    overlay.hidden = true;
+    canvas.focus?.();
+  }
+
+  function crash() {
+    state = "over";
+    for (let i = 0; i < 40; i++) {
+      const a = Math.random() * Math.PI * 2, s = 60 + Math.random() * 240;
+      sparks.push({ x: ship.x, y: ship.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1 });
+    }
+    const isBest = elapsed > best;
+    if (isBest) {
+      best = elapsed;
+      bestEl.textContent = best.toFixed(2) + "s";
+      try { localStorage.setItem("meteor-dodge-best", String(best)); } catch (e) {}
+    }
+    headline.textContent = isBest ? "New best: " + elapsed.toFixed(2) + "s" : "Hit at " + elapsed.toFixed(2) + "s";
+    message.textContent = isBest ? "That's your longest run yet." : "Your best is " + best.toFixed(2) + "s. Try again?";
+    startBtn.textContent = "Fly again";
+    setTimeout(() => { overlay.hidden = false; startBtn.focus(); }, 600);
+  }
+
+  function update(dt) {
+    for (const s of stars) {
+      if (!reduceMotion) s.y += s.v * dt;
+      if (s.y > H) { s.y = 0; s.x = Math.random() * W; }
+    }
+
+    // In idle mode meteors still fall so the screen is alive behind the menu.
+    const t = state === "playing" ? elapsed : 4;
+    if (state !== "over") {
+      spawnTimer -= dt;
+      if (spawnTimer <= 0) { spawnMeteor(t); spawnTimer = spawnInterval(t); }
+    }
+
+    if (state === "playing") {
+      elapsed += dt;
+      timeEl.textContent = elapsed.toFixed(2) + "s";
+
+      const accel = 2600, maxV = 460;
+      let dir = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+      if (pointerX !== null && dir === 0) {
+        const diff = pointerX - ship.x;
+        ship.vx = Math.max(-maxV * 1.3, Math.min(maxV * 1.3, diff * 12));
+      } else {
+        if (dir) ship.vx += dir * accel * dt;
+        else ship.vx *= Math.pow(0.0005, dt);
+        ship.vx = Math.max(-maxV, Math.min(maxV, ship.vx));
+      }
+      ship.x += ship.vx * dt;
+      if (ship.x < ship.r) { ship.x = ship.r; ship.vx = 0; }
+      if (ship.x > W - ship.r) { ship.x = W - ship.r; ship.vx = 0; }
+    }
+
+    for (const m of meteors) {
+      m.y += m.vy * dt; m.x += m.vx * dt; m.rot += m.spin * dt;
+      if (state === "playing") {
+        const dx = m.x - ship.x, dy = m.y - ship.y;
+        // Slightly forgiving hitbox (0.8) so near-misses feel fair.
+        if (dx * dx + dy * dy < Math.pow((m.r + ship.r) * 0.8, 2)) { crash(); break; }
+      }
+    }
+    meteors = meteors.filter(m => m.y - m.r < H + 10);
+
+    for (const p of sparks) {
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vx *= 0.96; p.vy *= 0.96; p.life -= dt * 1.2;
+    }
+    sparks = sparks.filter(p => p.life > 0);
+  }
+
+  function drawShip() {
+    const { x, y, r } = ship;
+    const tilt = Math.max(-0.35, Math.min(0.35, ship.vx / 1200));
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(tilt);
+    // Engine flame flickers.
+    const f = 10 + Math.random() * 8;
+    ctx.fillStyle = COLORS.flame;
+    ctx.beginPath();
+    ctx.moveTo(-5, r * 0.6); ctx.lineTo(0, r * 0.6 + f); ctx.lineTo(5, r * 0.6);
+    ctx.fill();
+    ctx.fillStyle = COLORS.ship;
+    ctx.beginPath();
+    ctx.moveTo(0, -r * 1.2);
+    ctx.lineTo(r, r * 0.8);
+    ctx.lineTo(0, r * 0.4);
+    ctx.lineTo(-r, r * 0.8);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawMeteor(m) {
+    ctx.save();
+    ctx.translate(m.x, m.y);
+    // Faint trail above the rock.
+    const g = ctx.createLinearGradient(0, -m.r * 3, 0, 0);
+    g.addColorStop(0, "rgba(226,104,122,0)");
+    g.addColorStop(1, "rgba(226,104,122,0.35)");
+    ctx.fillStyle = g;
+    ctx.fillRect(-m.r * 0.6, -m.r * 3, m.r * 1.2, m.r * 3);
+    ctx.rotate(m.rot);
+    ctx.fillStyle = COLORS.rock;
+    ctx.beginPath();
+    for (let i = 0; i < m.sides; i++) {
+      const a = (i / m.sides) * Math.PI * 2;
+      const rr = m.r * (i % 2 ? 0.82 : 1);
+      ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = COLORS.rockCore;
+    ctx.beginPath();
+    ctx.arc(m.r * 0.25, -m.r * 0.2, m.r * 0.25, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = COLORS.star;
+    for (const s of stars) {
+      ctx.globalAlpha = 0.35 + s.s * 0.35;
+      ctx.fillRect(s.x, s.y, s.s, s.s);
+    }
+    ctx.globalAlpha = 1;
+    meteors.forEach(drawMeteor);
+    if (state !== "over") drawShip();
+    for (const p of sparks) {
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = p.life > 0.5 ? COLORS.ship : COLORS.flame;
+      ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  // Input
+  addEventListener("keydown", e => {
+    if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") { keys.left = true; pointerX = null; e.preventDefault(); }
+    if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") { keys.right = true; pointerX = null; e.preventDefault(); }
+    if ((e.key === " " || e.key === "Enter") && state !== "playing" && document.activeElement !== startBtn) {
+      e.preventDefault(); start();
+    }
+  });
+  addEventListener("keyup", e => {
+    if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") keys.left = false;
+    if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") keys.right = false;
+  });
+  const toLocal = e => e.clientX - canvas.getBoundingClientRect().left;
+  canvas.addEventListener("pointerdown", e => { pointerX = toLocal(e); canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener("pointermove", e => { if (e.buttons || e.pointerType === "mouse") pointerX = toLocal(e); });
+  canvas.addEventListener("pointerup", e => { if (e.pointerType !== "mouse") pointerX = null; });
+  canvas.addEventListener("pointerleave", () => { pointerX = null; });
+  startBtn.addEventListener("click", start);
+
+  new ResizeObserver(resize).observe(stage);
+  resize();
+  // Pre-fill the sky so the first frame already shows falling meteors.
+  for (let i = 0; i < 8; i++) {
+    spawnMeteor(4);
+    meteors[meteors.length - 1].y = Math.random() * H * 0.7;
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
